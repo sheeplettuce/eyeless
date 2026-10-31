@@ -1,0 +1,28 @@
+dificultad algoritmo  ganó%  atrapado%  t medio  oyó/paso  nodos/plan
+Fácil      dfs          37         63     24.7       0.1        62.4 <- por defecto
+Fácil      bfs          38         62     25.0       0.1        56.3
+Fácil      astar        38         62     25.0       0.1        46.5
+
+Medio      dfs          32         68     32.4       0.2        96.5
+Medio      bfs          32         68     30.6       0.2        94.9 <- por defecto
+Medio      astar        32         68     30.6       0.2        76.1
+
+Difícil    dfs          37         63     40.4       0.3       140.4
+Difícil    bfs          25         75     37.0       0.2       131.3
+Difícil    astar        23         77     36.4       0.2       105.1 <- por defecto
+
+
+ESCENARIO CACERÍA: jugador quieto, hace ruido cada 6 s (límite 90 s)
+dificultad algoritmo  atrapado%  t hasta captura  nodos/plan
+Fácil      dfs              88             31.4        44.9 <- por defecto
+Fácil      bfs              90             24.5        24.0
+Fácil      astar            90             24.4        17.4
+
+Medio      dfs              95             17.5        74.9
+Medio      bfs              95             11.9        34.1 <- por defecto
+Medio      astar            95             11.9        26.0
+
+Difícil    dfs              93             23.7       109.0
+Difícil    bfs              97             10.0        54.5
+Difícil    astar            97             10.0        42.9 <- por defecto
+
