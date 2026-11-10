@@ -23,15 +23,20 @@ si no, usa Bookman Old Style. Los textos del juego usan Times New Roman.
 | Ratón o ← → | girar |
 | Shift | correr (más rápido que el monstruo; consume resistencia que se regenera al soltarlo) |
 | Espacio | lanzar una piedra (distracción, hace ruido donde cae) |
-| Clic izquierdo o F | disparar si tienes munición; cada arma recogida tiene un disparo |
+| 1–5 | seleccionar un espacio del inventario |
+| Clic izquierdo | usar el espacio seleccionado: piedra en 1, arma en 2 |
+| F | disparar |
+| R | recargar hasta seis balas; empiezas con tres cargadas y tres de reserva |
 | Clic derecho | gritar «¡Hey!» (el monstruo lo oye a más distancia que un paso) |
 | Tab | minimapa (si el modo lo permite) |
 | F1 | **modo dev** (o la casilla "Modo dev", abajo a la derecha en menú/pausa/final): specs, mapa y árbol de búsqueda del monstruo |
 | Esc | pausa |
 
 Shift mantiene la carrera mientras haya resistencia; al agotarse, el jugador vuelve a caminar y la
-barra azul se recupera al soltarlo. Hay piedras y dos armas recogibles en cada laberinto; las piedras
-se suman al inventario y desaparecen al recogerlas. Cada arma da un disparo: si alcanza al monstruo,
+barra azul se recupera al soltarlo. Hay piedras y dos cajas de munición recogibles en las habitaciones
+de cada laberinto; cada mapa genera cinco habitaciones de tamaños variados. Las piedras se suman al inventario
+y desaparecen al recogerlas. Cada caja añade seis
+balas a la reserva. Si un disparo alcanza al monstruo,
 lo incapacita sin matarlo durante 60 s en Fácil, 40 s en Medio o 25 s en Difícil. Los puntos azules
 son escasos (2/3/4 según dificultad) y aparecen nuevos cada 120 segundos.
 El HUD indica la distancia por pasillos y hacia qué lado girar para llegar a la salida.
@@ -45,13 +50,14 @@ Durante cinco segundos conoce la ubicación exacta del jugador y lo rastrea si s
 
 **Audio:** los pasos del monstruo se oyen cada 0.9 tiles que recorre, con volumen según la distancia
 por pasillos (alcance 22 pasos) y espacialización estéreo aproximada. La respiración del jugador suena
-al correr y continúa un poco al parar; la del monstruo y sus rugidos aumentan al acercarse. También
-puede oírse su voz susurrada desde cualquier punto del laberinto, más fuerte de cerca y posicionada
-hacia el monstruo, con pitch muy bajo, distorsión gutural, modulación y ecos. Al hacer clic derecho,
-el jugador grita «¡Hey!» y el ruido alcanza más lejos que un paso. Las voces se generaron sin conexión
-con la síntesis de voz gratuita incluida en Windows y se
-guardan como un banco de diez frases en español; no hace falta instalar un TTS ni tener internet para
-jugar.
+al correr y continúa un poco al parar; la respiración del monstruo aumenta al acercarse. También
+el monstruo reproduce periódicamente frases aleatorias del banco, incluido `GRUNIDO`, tanto en patrulla
+como al perseguir. Las tres variantes de «¡Hey!» también usan ese banco; pygame reproduce las versiones
+WAV que acompañan a los originales M4A. La vista lleva un marco de cámara, líneas de barrido y un
+indicador REC dibujados por Pygame, sin conexión ni dependencias de shaders. «Próxima dos move» solo suena cuando el monstruo está a diez
+pasos de pasillo o menos; al acertarle un disparo, «Sobbing» suena en bucle y en exclusiva hasta que el
+monstruo se recupera. «Scream» únicamente suena al perder en el jumpscare. No se necesita instalar un
+TTS ni tener internet para jugar.
 
 El monstruo conserva su silueta humanoide oscura original, con movimiento procedural sutil. Las piedras
 se ven en vuelo, siguen una trayectoria arqueada, hacen ruido al impactar y permanecen brevemente
@@ -141,8 +147,8 @@ game/pathfinding.py     DFS, BFS y A*
 game/monster.py         estados, oído, creencia y movimiento
 game/world.py           reglas del juego (sin pygame: se puede simular)
 game/render.py          raycaster en primera persona, linterna, sprites
-game/audio.py           audio espacializado y voces susurradas
-game/assets/            voces del jugador y del monstruo
+game/audio.py           paneo estéreo y voces susurradas
+game/assets/SOUNDS/     voces del jugador y del monstruo
 game/debug_view.py      modo dev: mapa, specs y árbol de búsqueda animado
 game/app.py             ventana, menús y HUD
 tools/benchmark.py      compara algoritmos sin jugar

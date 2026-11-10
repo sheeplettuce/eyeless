@@ -1,4 +1,4 @@
-"""Efectos sintetizados por código y voces pregrabadas con TTS."""
+"""Efectos sintetizados y voces del banco de sonidos."""
 import array
 import math
 import random
@@ -17,54 +17,20 @@ def _lowpass(samples, k=0.15):
     return out
 
 
-def _compress(samples, peak=0.85):
-    source_peak = max((abs(sample) for sample in samples), default=0.0)
-    if source_peak <= 1e-9:
-        return samples
-    return [math.tanh(sample / source_peak * 1.7) * peak for sample in samples]
-
-
-def _monster_voice_effects(samples):
-    if not samples:
-        return []
-
-    def pitch_shift(source, ratio):
-        length = max(1, round(len(source) / ratio))
-        return [
-            source[min(int(i * ratio), len(source) - 1)]
-            for i in range(length)
-        ]
-
-    pitched = pitch_shift(samples, 0.52)
-    consonants = pitch_shift(samples, 0.78)
-    original_low = _lowpass(samples, 0.045)
-    original_hiss = [sample - low for sample, low in zip(samples, original_low)]
-    consonant_low = _lowpass(consonants, 0.11)
-    consonant_hiss = [sample - low for sample, low in zip(consonants, consonant_low)]
-    hiss_env = _lowpass([abs(sample) for sample in original_hiss], 0.035)
-    rng = random.Random(len(samples))
-    air_noise = _lowpass([rng.uniform(-1.0, 1.0) for _ in consonants], 0.42)
-    dark = _lowpass(pitched, 0.13)
-    rumble = _lowpass(dark, 0.035)
-    processed = []
-    for i, sample in enumerate(pitched):
-        t = i / RATE
-        tremolo = 0.94 + 0.06 * math.sin(2 * math.pi * 3.2 * t)
-        growl = rumble[i] * 0.18
-        j = min(len(consonants) - 1, round(i * 0.52 / 0.78))
-        air = min(1.0, hiss_env[min(len(hiss_env) - 1, round(i * 0.52))] * 8)
-        whisper = (dark[i] * 0.68 + sample * 0.12 + growl
-                   + consonant_hiss[j] * 1.35
-                   + air_noise[j] * air * 0.075)
-        processed.append(math.tanh(whisper * 1.65) * tremolo)
-    echo_taps = ((0.16, 0.26), (0.32, 0.17), (0.51, 0.10))
-    tail = round(echo_taps[-1][0] * RATE)
-    output = [0.0] * (len(processed) + tail)
-    for i, sample in enumerate(processed):
-        output[i] += sample
-        for delay, gain in echo_taps:
-            output[i + round(delay * RATE)] += sample * gain
-    return _compress(output, 0.86)
+HEY_VOICES = ("hey_1", "hey_2", "hey_3")
+MONSTER_VOICES = (
+    "a_donde_vas",
+    "escucho_tus_latidos",
+    "estoy_detras_de_ti",
+    "grunido",
+    "no_tienes_mucho_tiempo",
+    "puedo_olerte",
+    "se_donde_te_encuentras",
+    "te_estoy_escuchando",
+    "ya_te_cansaste",
+)
+SOUND_BANK = (*HEY_VOICES, *MONSTER_VOICES, "grunido", "proxima_dos_move",
+              "sobbing", "scream")
 
 
 class Audio:
@@ -72,8 +38,11 @@ class Audio:
         self.ok = False
         self.sounds = {}
         self._step_flip = False
-        self._mono = {}
-        self._directional = {}
+        self._exclusive_sobbing = False
+        self._pending_sobbing = None
+        self._shot_channel = None
+        self._hey_voices = HEY_VOICES
+        self._monster_voices = MONSTER_VOICES
         if not enabled:
             return
         try:
@@ -101,12 +70,12 @@ class Audio:
     def _build(self):
         rng = random.Random(3)
         # crujido de madera: sierra grave + ruido filtrado
-        n = int(RATE * 0.6)
+        n = int(RATE * 0.3)
         noise = _lowpass([rng.uniform(-1, 1) for _ in range(n)], 0.12)
         phase, creak = 0.0, []
         for i in range(n):
             t = i / RATE
-            env = math.sin(math.pi * t / 0.6) ** 0.7
+            env = math.sin(math.pi * t / 0.3) ** 0.7
             f = 110 + 35 * math.sin(2 * math.pi * 3.1 * t) + 20 * math.sin(2 * math.pi * 11 * t)
             phase += f / RATE
             saw = (phase % 1.0) * 2 - 1
@@ -166,29 +135,7 @@ class Audio:
             player_breath.append(air * envelope * modulation * 0.82)
         self.sounds["player_breath"] = self._make(player_breath)
 
-        roar_noise = _lowpass([rng.uniform(-1, 1) for _ in range(int(RATE * 1.6))], 0.18)
-        phase, roar = 0.0, []
-        for i, sample in enumerate(roar_noise):
-            t = i / RATE
-            phase += (54 + 38 * math.sin(math.pi * t / 1.6)) / RATE
-            envelope = math.sin(math.pi * t / 1.6) ** 0.65
-            tone = math.sin(2 * math.pi * phase) + 0.4 * math.sin(4 * math.pi * phase)
-            roar.append(math.tanh(1.7 * (tone + 1.4 * sample)) * envelope * 0.62)
-        self.sounds["monster_roar"] = self._make(roar)
         self.sounds["monster_breath"] = self.sounds["breath"]
-
-        glitch_rng = random.Random(731)
-        n = int(RATE * 0.72)
-        glitch = []
-        for i in range(n):
-            t = i / RATE
-            gate = (1.0 if (t < 0.12 or 0.20 < t < 0.31
-                            or 0.39 < t < 0.54 or 0.61 < t < 0.72) else 0.0)
-            static = round(glitch_rng.uniform(-1.0, 1.0) * 18) / 18
-            tone = math.sin(2 * math.pi * (390 + 1700 * t) * t)
-            glitch.append(math.tanh((static * 0.82 + tone * 0.18) * gate * 2.4)
-                          * (0.85 - 0.45 * t))
-        self.sounds["jumpscare_glitch"] = self._make(glitch)
 
         # gemido distante: armónicos que descienden con una capa de aire
         n = int(RATE * 1.8)
@@ -225,15 +172,8 @@ class Audio:
                         * math.exp(-t * 45) * amp * 0.6
         self.sounds["pebble"] = self._make(pb)
 
-        n = int(RATE * 0.4)
-        gunshot = []
-        for i in range(n):
-            t = i / RATE
-            envelope = math.exp(-t * 32)
-            crack = rng.uniform(-1.0, 1.0) * math.exp(-t * 90)
-            thump = math.sin(2 * math.pi * 92 * t) * envelope
-            gunshot.append(math.tanh(2.0 * crack + 0.8 * thump) * envelope * 0.9)
-        self.sounds["gunshot"] = self._make(gunshot)
+        assets = Path(__file__).with_name("assets")
+        self.sounds["gunshot"] = pygame.mixer.Sound(str(assets / "shoot_bitcrushed.wav"))
 
         # zumbido ambiente en bucle (ciclos enteros => sin cortes)
         secs = 4
@@ -242,81 +182,46 @@ class Audio:
             [(math.sin(2 * math.pi * 55 * i / RATE) * 0.5 + math.sin(2 * math.pi * 58 * i / RATE) * 0.4
               + math.sin(2 * math.pi * 110 * i / RATE) * 0.15) * 0.22 for i in range(n)])
 
-        assets = Path(__file__).with_name("assets")
-        shout = pygame.mixer.Sound(str(assets / "shout_hey.wav"))
-        shout_raw = array.array("h")
-        shout_raw.frombytes(shout.get_raw())
-        shout_samples = [sample / 32768.0 for sample in shout_raw[::2]]
-        self.sounds["shout_hey"] = self._make(_compress(shout_samples, 0.92))
-        for index in range(10):
-            name = f"monster_voice_{index}"
-            voice = pygame.mixer.Sound(str(assets / f"{name}.wav"))
-            raw = array.array("h")
-            raw.frombytes(voice.get_raw())
-            source = [sample / 32768.0 for sample in raw[::2]]
-            low = _lowpass(source, 0.22)
-            breath_noise = _lowpass([rng.uniform(-1.0, 1.0) for _ in source], 0.18)
-            envelope = _lowpass([abs(sample) for sample in source], 0.025)
-            whisper = []
-            for i, sample in enumerate(source):
-                high = sample - low[i]
-                whisper.append(0.38 * low[i] + 0.52 * high
-                               + 0.12 * breath_noise[i] * min(1.0, envelope[i] * 7))
-            self.sounds[name] = self._make(_monster_voice_effects(whisper))
-
-        for name, sound in self.sounds.items():
-            samples = array.array("h")
-            samples.frombytes(sound.get_raw())
-            self._mono[name] = samples[::2]
+        sound_bank = assets / "SOUNDS"
+        for name in SOUND_BANK:
+            self.sounds[name] = pygame.mixer.Sound(str(sound_bank / f"{name.upper()}.wav"))
 
     # ---------------------------------------------------------- reproducción
-    def _spatial_sound(self, name, pan, front):
+    @staticmethod
+    def _pan_gains(pan, front):
         angle = math.atan2(max(-1.0, min(1.0, pan)), max(-1.0, min(1.0, front)))
-        sector = round(angle / (2 * math.pi) * 16) % 16
-        key = (name, sector)
-        if key in self._directional:
-            return self._directional[key]
-
-        angle = sector / 16 * 2 * math.pi
         side = math.sin(angle)
         rear = math.cos(angle) < 0
-        mono = self._mono[name]
-        delay = int(abs(side) * RATE * 0.00055)
-        delayed_ear = 0 if side > 0 else 1
-        left_gain = math.sqrt((1.0 - side) * 0.5)
-        right_gain = math.sqrt((1.0 + side) * 0.5)
-        buf = array.array("h")
-        filtered_samples = []
-        filtered = 0.0
-        for i, sample in enumerate(mono):
-            filtered += (0.10 if rear else 0.32) * (sample - filtered)
-            filtered_samples.append(filtered)
-            source = filtered if rear else sample
-            if i >= delay:
-                delayed = filtered_samples[i - delay] if rear else mono[i - delay]
-            else:
-                delayed = source
-            left = delayed if delayed_ear == 0 else source
-            right = delayed if delayed_ear == 1 else source
-            if rear:
-                left, right = left * 0.82, right * 0.82
-            buf.append(int(max(-32768, min(32767, left * left_gain))))
-            buf.append(int(max(-32768, min(32767, right * right_gain))))
-        sound = pygame.mixer.Sound(buffer=buf.tobytes())
-        self._directional[key] = sound
-        return sound
+        rear_gain = 0.82 if rear else 1.0
+        return (math.sqrt((1.0 - side) * 0.5) * rear_gain,
+                math.sqrt((1.0 + side) * 0.5) * rear_gain)
 
     def _play(self, name, vol=1.0, pan=0.0, loops=0, front=1.0):
-        if not self.ok:
+        if not self.ok or (self._exclusive_sobbing and name != "sobbing"):
             return
-        spatial_names = ("step", "step2", "breath", "monster_breath", "monster_roar",
-                         "player_breath", "scrape", "pebble", "shout_hey",
-                         "gunshot",
-                         *(f"monster_voice_{index}" for index in range(10)))
-        sound = self._spatial_sound(name, pan, front) if name in spatial_names else self.sounds[name]
-        ch = sound.play(loops=loops)
+        spatial_names = ("step", "step2", "breath", "monster_breath",
+                         "player_breath", "scrape", "pebble", "gunshot",
+                         *self._hey_voices, *self._monster_voices,
+                         "proxima_dos_move", "sobbing")
+        ch = self.sounds[name].play(loops=loops)
         if ch:
-            ch.set_volume(max(0.0, min(1.0, vol)))
+            if name in spatial_names:
+                left, right = self._pan_gains(pan, front)
+            else:
+                left = right = 1.0
+            ch.set_volume(max(0.0, min(1.0, vol * left)),
+                          max(0.0, min(1.0, vol * right)))
+        return ch
+
+    def _start_pending_sobbing(self):
+        if self._pending_sobbing is None:
+            return
+        if self._shot_channel is not None and self._shot_channel.get_busy():
+            return
+        pan, front = self._pending_sobbing
+        self._pending_sobbing = None
+        self._shot_channel = None
+        self._play("sobbing", 1.0, pan, loops=-1, front=front)
 
     def ambient(self):
         self._play("drone", 0.5, 0.0, loops=-1)
@@ -324,12 +229,43 @@ class Audio:
     def stop(self):
         if self.ok:
             pygame.mixer.stop()
+        self._exclusive_sobbing = False
+        self._pending_sobbing = None
+        self._shot_channel = None
 
     def handle(self, ev):
         """ev = (tipo, a, b) generado por World.events."""
+        if ev[0] == "monster_recovered":
+            if self._exclusive_sobbing:
+                if self.ok:
+                    pygame.mixer.stop()
+                self._exclusive_sobbing = False
+                self._pending_sobbing = None
+                self._shot_channel = None
+                self.ambient()
+            return
+        if self._exclusive_sobbing:
+            if self._pending_sobbing is not None and ev[0] == "gunshot":
+                _, volume, pan, front = ev
+                self._shot_channel = self._play("gunshot", volume, pan, front=front)
+                self._start_pending_sobbing()
+                return
+            self._start_pending_sobbing()
+            return
         if ev[0] == "monster_voice":
-            _, index, volume, pan, front = ev
-            self._play(f"monster_voice_{index}", volume, pan, front=front)
+            _, volume, pan, front = ev
+            self._play(random.choice(self._monster_voices), volume, pan, front=front)
+            return
+        if ev[0] == "monster_near":
+            _, pan, front = ev
+            self._play("proxima_dos_move", 1.0, pan, front=front)
+            return
+        if ev[0] == "monster_hit":
+            _, pan, front = ev
+            if self.ok:
+                pygame.mixer.stop()
+                self._exclusive_sobbing = True
+                self._pending_sobbing = (pan, front)
             return
         kind, a, b, *direction = ev
         front = direction[0] if direction else 1.0
@@ -337,23 +273,22 @@ class Audio:
             self._play("creak", a)
         elif kind == "step":
             self._step_flip = not self._step_flip
-            self._play("step2" if self._step_flip else "step", 0.22 + 0.78 * a, b, front=front)
+            self._play("step2" if self._step_flip else "step", 0.19 + 0.68 * a, b,
+                       front=front)
         elif kind == "heart":
             self._play("heart", 0.3 + 0.7 * a)
         elif kind == "pebble":
             self._play("pebble", 0.8, b, front=front)
         elif kind == "shout":
-            self._play("shout_hey", a, b, front=front)
+            self._play(random.choice(self._hey_voices), a, b, front=front)
         elif kind == "gunshot":
             self._play("gunshot", a, b, front=front)
-        elif kind == "jumpscare_glitch":
-            self._play("jumpscare_glitch", a * 0.65)
-        elif kind in ("breath", "monster_breath", "monster_roar", "player_breath",
+        elif kind == "jumpscare":
+            self._play("scream", a)
+        elif kind in ("breath", "monster_breath", "player_breath",
                       "groan", "scrape"):
             if kind == "monster_breath":
                 volume = 0.30 + 0.62 * a
-            elif kind == "monster_roar":
-                volume = 0.65 * a
             elif kind == "player_breath":
                 volume = 0.38 + 0.55 * a
             else:

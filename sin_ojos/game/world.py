@@ -8,7 +8,9 @@ from .config import (WALK_SPEED, SPRINT_FACTOR, SPRINT_DRAIN, SPRINT_REGEN, SPRI
                      STEP_STRIDE, STEP_HEAR_RANGE, FOG_RANGE, FOG_RISE,
                      BLUE_POINT_INTERVAL, SHOUT_RANGE_FACTOR, SPRINT_MONSTER_MARGIN,
                      PEBBLE_PICKUP_COUNT, WEAPON_PICKUP_COUNT, WEAPON_RANGE,
-                     WEAPON_HIT_RADIUS, WEAPON_STUN_DURATION)
+                     WEAPON_HIT_RADIUS, WEAPON_STUN_DURATION, MAGAZINE_SIZE,
+                     STARTING_MAGAZINE_AMMO, STARTING_RESERVE_AMMO, AMMO_PICKUP_AMOUNT,
+                     PROXIMA_DOS_MOVE_RANGE)
 from .maze import generate
 from .monster import Monster
 from .noisemap import build_floor_darkness, build_noise_tiles
@@ -73,13 +75,19 @@ class World:
         self._breath_pressure = 0.0
         self._voice_rng = random.Random(self.seed + 251)
         self._voice_timer = self._voice_rng.uniform(5.0, 10.0)
+        self._monster_incapacitation_active = False
         self.pebble_projectiles = []
         self._points_rng = random.Random(self.seed + 193)
         self._points_timer = BLUE_POINT_INTERVAL
         self.blue_points = set()
         self._spawn_blue_points(self._blue_point_batch_size())
         self._spawn_pickups(rng)
-        self.ammo = 0
+        self.ammo = STARTING_MAGAZINE_AMMO
+        self.ammo_reserve = STARTING_RESERVE_AMMO
+        self.hand_action = None
+        self.hand_action_started = 0.0
+        self.hand_action_until = 0.0
+        self.muzzle_flash_until = 0.0
 
     # ------------------------------------------------------------ jugador
     def _blocked(self, x, y):
@@ -91,6 +99,46 @@ class World:
                 if g[int(cy)][int(cx)]:
                     return True
         return False
+
+    def door_ahead(self):
+        dx, dy = math.cos(self.angle), math.sin(self.angle)
+        for step in range(1, 31):
+            x, y = self.px + dx * step * 0.05, self.py + dy * step * 0.05
+            tile = (int(x), int(y))
+            if not (0 <= tile[0] < self.maze.w and 0 <= tile[1] < self.maze.h):
+                return None
+            if tile in self.maze.doors:
+                return tile
+            if self.maze.grid[tile[1]][tile[0]]:
+                return None
+        return None
+
+    def interact_door(self):
+        tile = self.door_ahead()
+        if tile is None:
+            return False
+        opening = not self.maze.doors[tile]
+        if not opening:
+            nearest_x = max(tile[0], min(self.px, tile[0] + 1))
+            nearest_y = max(tile[1], min(self.py, tile[1] + 1))
+            if ((self.px - nearest_x) ** 2 + (self.py - nearest_y) ** 2
+                    <= PLAYER_RADIUS ** 2):
+                return False
+        self.maze.set_door(tile, opening)
+        if not opening:
+            player_tile = (int(self.px), int(self.py))
+            reachable = self.maze.bfs_dist(player_tile)
+            needed = [self.exit, self.monster.here]
+            if self.monster.goal is not None:
+                needed.append(self.monster.goal)
+            if any(target not in reachable for target in needed):
+                self.maze.set_door(tile, True)
+                return False
+            if self.monster.goal is not None:
+                self.monster._plan(self.monster.goal)
+        self.exit_distances = self.maze.bfs_dist(self.exit)
+        self.emit_noise(self.player_tile, max(3, self.diff.hear_radius // 2), "puerta")
+        return True
 
     def move_player(self, vx, vy, sprint, dt):
         n = math.hypot(vx, vy)
@@ -133,6 +181,9 @@ class World:
                 break
             last = (x, y)
         self.pebbles -= 1
+        self.hand_action = "throw"
+        self.hand_action_started = self.time
+        self.hand_action_until = self.time + 0.35
         distance = math.hypot(last[0] - self.px, last[1] - self.py)
         self.pebble_projectiles.append({
             "start": (self.px, self.py),
@@ -147,6 +198,10 @@ class World:
         if self.state != PLAYING or self.ammo <= 0:
             return False
         self.ammo -= 1
+        self.hand_action = "gunshot"
+        self.hand_action_started = self.time
+        self.hand_action_until = self.time + 1.25
+        self.muzzle_flash_until = self.time + 0.18
         dx, dy = math.cos(self.angle), math.sin(self.angle)
         mx, my = self.monster.pos
         rx, ry = mx - self.px, my - self.py
@@ -163,8 +218,19 @@ class World:
                     break
         if hit:
             self.monster.incapacitate(self.time, WEAPON_STUN_DURATION[self.diff.key])
+            self._monster_incapacitation_active = True
+            pan, front = self._bearing_pan(mx, my)
+            self.events.append(("monster_hit", pan, front))
         self.emit_noise(self.player_tile, max(12, self.diff.hear_radius + 8), "disparo")
         self.events.append(("gunshot", 1.0, 0.0, 1.0))
+        return True
+
+    def reload_weapon(self):
+        if self.state != PLAYING or self.ammo >= MAGAZINE_SIZE or self.ammo_reserve <= 0:
+            return False
+        loaded = min(MAGAZINE_SIZE - self.ammo, self.ammo_reserve)
+        self.ammo += loaded
+        self.ammo_reserve -= loaded
         return True
 
     # ------------------------------------------------------------ ruido
@@ -266,6 +332,10 @@ class World:
                     self.revealed_noisy.add(t)
 
         self.monster.update(dt, self.time, self.player_tile)
+        if (self._monster_incapacitation_active
+                and self.time >= self.monster.incapacitated_until):
+            self._monster_incapacitation_active = False
+            self.events.append(("monster_recovered",))
 
         self._voice_timer -= dt
         if self._voice_timer <= 0:
@@ -274,8 +344,9 @@ class World:
             max_distance = max(1, max(self.exit_distances.values()))
             proximity = max(0.0, 1.0 - voice_distance / max_distance)
             pan, front = self._bearing_pan(*self.monster.pos)
-            self.events.append(("monster_voice", self._voice_rng.randrange(10),
-                                0.24 + 0.40 * proximity, pan, front))
+            self.events.append(("monster_voice", 0.24 + 0.40 * proximity, pan, front))
+            if voice_distance <= PROXIMA_DOS_MOVE_RANGE:
+                self.events.append(("monster_near", pan, front))
             self._voice_timer = self._voice_rng.uniform(12.0, 22.0)
 
         # --- audio: pasos y latidos del monstruo, por distancia de pasillo
@@ -300,10 +371,7 @@ class World:
                 close = max(0.0, min(1.0, 1.0 - self.mon_dist / 11.0))
                 pan, front = self._bearing_pan(mx, my)
                 roar_mix = max(0.0, min(1.0, (7.0 - self.mon_dist) / 5.0))
-                breath_level = close * (1.0 - 0.65 * roar_mix)
-                self.events.append(("monster_breath", breath_level, pan, front))
-                if roar_mix > 0.05:
-                    self.events.append(("monster_roar", close * roar_mix, pan, front))
+                self.events.append(("monster_breath", close, pan, front))
                 if roar_mix >= 0.5:
                     self._fx_timer = self._fx_rng.uniform(1.7, 2.8)
                 elif self._fx_rng.random() < 0.75:
@@ -355,11 +423,25 @@ class World:
 
     def _spawn_pickups(self, rng):
         occupied = set(self.noisy) | self.blue_points | {self.start, self.exit, self.monster.here}
-        candidates = [tile for tile in self.maze.floor if tile not in occupied]
-        rng.shuffle(candidates)
-        self.stone_pickups = set(candidates[:PEBBLE_PICKUP_COUNT])
-        self.weapon_pickups = set(candidates[PEBBLE_PICKUP_COUNT:
-                                              PEBBLE_PICKUP_COUNT + WEAPON_PICKUP_COUNT])
+        room_candidates = []
+        one_per_room = []
+        for room in self.maze.rooms:
+            available = list(room - occupied)
+            rng.shuffle(available)
+            if available:
+                one_per_room.append(available.pop())
+                room_candidates.extend(available)
+        rng.shuffle(room_candidates)
+        stones = one_per_room[:PEBBLE_PICKUP_COUNT]
+        stones.extend(room_candidates[:PEBBLE_PICKUP_COUNT - len(stones)])
+        occupied.update(stones)
+        ammo_candidates = [tile for tile in room_candidates if tile not in occupied]
+        rng.shuffle(ammo_candidates)
+        general = [tile for tile in self.maze.floor if tile not in occupied]
+        rng.shuffle(general)
+        ammo_candidates.extend(general)
+        self.stone_pickups = set(stones)
+        self.weapon_pickups = set(ammo_candidates[:WEAPON_PICKUP_COUNT])
 
     def _collect_pickups(self):
         for pickups, item in ((self.stone_pickups, "stone"), (self.weapon_pickups, "weapon")):
@@ -370,4 +452,4 @@ class World:
                 if item == "stone":
                     self.pebbles += 1
                 else:
-                    self.ammo += 1
+                    self.ammo_reserve += AMMO_PICKUP_AMOUNT

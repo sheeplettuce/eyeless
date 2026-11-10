@@ -11,7 +11,8 @@ os.environ.setdefault("SDL_VIDEODRIVER", "dummy")
 os.environ.setdefault("SDL_AUDIODRIVER", "dummy")
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 
-from game.config import DIFFICULTIES, SCREEN_W, STEP_HEAR_RANGE
+from game.config import (DIFFICULTIES, PROXIMA_DOS_MOVE_RANGE, SCREEN_W,
+                         STEP_HEAR_RANGE)
 from game.maze import generate
 from game.monster import INVESTIGATE, SEARCH
 from game.pathfinding import bfs, dfs, astar
@@ -22,6 +23,50 @@ class Tests(unittest.TestCase):
     def test_maze_connected(self):
         m = generate(10, 0.3, random.Random(1))
         self.assertEqual(len(m.bfs_dist((1, 1))), len(m.floor))
+        self.assertEqual(len(m.doors), 5)
+        self.assertEqual(len(m.rooms), 5)
+        self.assertGreater(len({len(room) for room in m.rooms}), 1)
+
+    def test_puertas_abren_salones_y_evitan_atrapar_al_jugador(self):
+        world = World(DIFFICULTIES[1], seed=31)
+        door = next(iter(world.maze.doors))
+        entrance = next(tile for tile in ((door[0] + dx, door[1] + dy)
+                                          for dx, dy in ((1, 0), (-1, 0), (0, 1), (0, -1)))
+                        if tile in world.maze.floor)
+
+        def face(from_tile, to_tile):
+            world.px, world.py = from_tile[0] + 0.5, from_tile[1] + 0.5
+            world.player_tile = from_tile
+            world.angle = math.atan2(to_tile[1] - from_tile[1], to_tile[0] - from_tile[0])
+
+        face(entrance, door)
+        self.assertTrue(world.interact_door())
+        room_tile = next(tile for tile in world.maze.room_tiles
+                         if abs(tile[0] - door[0]) + abs(tile[1] - door[1]) == 1)
+        self.assertIn(room_tile, world.maze.floor)
+
+        world.px, world.py = door[0] + 0.5, door[1] + 0.5
+        world.player_tile = door
+        world.angle = 0.0
+        self.assertFalse(world.interact_door())
+        self.assertTrue(world.maze.doors[door])
+        self.assertIn(door, world.maze.adj)
+
+        face(room_tile, door)
+        self.assertFalse(world.interact_door())
+        self.assertTrue(world.maze.doors[door])
+
+        corridor = next(tile for tile in world.maze.adj[door]
+                        if tile != room_tile and tile in world.maze.floor)
+        world.px, world.py = door[0] + 0.05, door[1] + 0.5
+        world.player_tile = corridor
+        world.angle = math.atan2(corridor[1] - door[1], corridor[0] - door[0])
+        self.assertFalse(world.interact_door())
+        self.assertTrue(world.maze.doors[door])
+
+        face(entrance, door)
+        self.assertTrue(world.interact_door())
+        self.assertNotIn(room_tile, world.maze.floor)
 
     def test_paths_valid_and_optimal(self):
         rng = random.Random(2)
@@ -133,6 +178,12 @@ class Tests(unittest.TestCase):
     def test_piedras_y_armas_se_recogen_y_desaparecen(self):
         w = World(DIFFICULTIES[1], seed=26)
         self.assertEqual(len(w.weapon_pickups), 2)
+        self.assertEqual((w.ammo, w.ammo_reserve), (3, 3))
+        self.assertTrue(all(room & (w.stone_pickups | w.weapon_pickups)
+                            for room in w.maze.rooms))
+        self.assertTrue(w.reload_weapon())
+        self.assertEqual((w.ammo, w.ammo_reserve), (6, 0))
+        self.assertFalse(w.reload_weapon())
 
         stone = next(iter(w.stone_pickups))
         stones_before = w.pebbles
@@ -142,9 +193,10 @@ class Tests(unittest.TestCase):
         self.assertNotIn(stone, w.stone_pickups)
 
         weapon = next(iter(w.weapon_pickups))
+        reserve_before = w.ammo_reserve
         w.px, w.py = weapon[0] + 0.5, weapon[1] + 0.5
         w.update(0.01)
-        self.assertEqual(w.ammo, 1)
+        self.assertEqual(w.ammo_reserve, reserve_before + 6)
         self.assertNotIn(weapon, w.weapon_pickups)
 
     def test_arma_incapacita_sin_matar_segun_dificultad(self):
@@ -170,6 +222,8 @@ class Tests(unittest.TestCase):
                 self.assertEqual(w.monster.incapacitated_until, expected[diff.key])
                 self.assertEqual(w.noise_log[-1].kind, "disparo")
                 self.assertTrue(any(event[0] == "gunshot" for event in w.events))
+                self.assertTrue(any(event[0] == "monster_hit" for event in w.events))
+                self.assertTrue(w._monster_incapacitation_active)
                 w.update(0.1)
                 self.assertEqual(w.monster.pos, monster_pos)
                 self.assertEqual(w.state, PLAYING)
@@ -177,6 +231,15 @@ class Tests(unittest.TestCase):
                 self.assertEqual(w.monster.pos, monster_pos)
                 w.monster.update(0.1, expected[diff.key] + 0.1, w.player_tile)
                 self.assertNotEqual(w.monster.pos, monster_pos)
+
+    def test_disparo_fallido_no_genera_sollozo(self):
+        w = World(DIFFICULTIES[1], seed=27)
+        w.monster.idle = 1000.0
+        w.angle = math.pi
+        w.ammo = 1
+        self.assertTrue(w.shoot_weapon())
+        self.assertTrue(any(event[0] == "gunshot" for event in w.events))
+        self.assertFalse(any(event[0] == "monster_hit" for event in w.events))
 
     def test_paneo_estereo_distingue_frente_espalda_e_lados(self):
         w = World(DIFFICULTIES[1], seed=16)
@@ -231,49 +294,87 @@ class Tests(unittest.TestCase):
         w.player_tile = w.exit
         self.assertEqual(w.exit_hint(), "¡La salida está aquí!")
 
-    def test_respiracion_audible_y_voces_espaciales_se_generan(self):
+    def test_respiracion_y_banco_de_sonidos(self):
         import pygame
-        from game.audio import Audio, _lowpass, _monster_voice_effects
+        from game.audio import Audio, HEY_VOICES, MONSTER_VOICES, SOUND_BANK
+        self.assertIn("grunido", MONSTER_VOICES)
         pygame.init()
         pygame.mixer.init(22050, -16, 2, 512, allowedchanges=0)
         audio = Audio()
         self.assertEqual(pygame.mixer.get_init(), (22050, -16, 2))
-        self.assertAlmostEqual(len(audio._mono["breath"]) / 22050, 1.25, places=2)
-        self.assertAlmostEqual(len(audio._mono["player_breath"]) / 22050, 1.0, places=2)
-        for name in ("breath", "player_breath", "shout_hey", "gunshot",
-                     "jumpscare_glitch",
-                     *(f"monster_voice_{index}" for index in range(10))):
-            self.assertIn(name, audio._mono)
-            self.assertGreater(max(abs(sample) for sample in audio._mono[name]), 4000)
-        left_voice = audio._spatial_sound("monster_voice_0", -1.0, 0.0)
-        right_voice = audio._spatial_sound("monster_voice_0", 1.0, 0.0)
-        self.assertNotEqual(left_voice.get_raw(), right_voice.get_raw())
-        dry_voice = [math.sin(2 * math.pi * 180 * i / 22050) * 0.2
-                     for i in range(22050)]
-        processed_voice = _monster_voice_effects(dry_voice)
-        self.assertGreater(len(processed_voice), len(dry_voice) * 1.8)
-        self.assertGreater(max(abs(sample) for sample in processed_voice[-int(0.4 * 22050):]),
-                           0.01)
-        voiced_test = [0.18 * math.sin(2 * math.pi * 180 * i / 22050)
-                       + 0.12 * math.sin(2 * math.pi * 5000 * i / 22050)
-                       for i in range(22050)]
-        crispy_voice = _monster_voice_effects(voiced_test)
-        low_band = _lowpass(crispy_voice, 0.08)
-        high_rms = (sum((sample - low) ** 2 for sample, low in zip(crispy_voice, low_band))
-                    / len(crispy_voice)) ** 0.5
-        full_rms = (sum(sample ** 2 for sample in crispy_voice) / len(crispy_voice)) ** 0.5
-        self.assertGreater(high_rms / full_rms, 0.15)
+        self.assertAlmostEqual(audio.sounds["breath"].get_length(), 1.25, places=2)
+        self.assertAlmostEqual(audio.sounds["player_breath"].get_length(), 1.0, places=2)
+        self.assertAlmostEqual(audio.sounds["creak"].get_length(), 0.3, places=2)
+        for name in ("breath", "player_breath", "gunshot", *SOUND_BANK):
+            self.assertIn(name, audio.sounds)
+            self.assertGreater(len(audio.sounds[name].get_raw()), 0)
+        self.assertGreater(audio._pan_gains(-1.0, 0.0)[0],
+                           audio._pan_gains(-1.0, 0.0)[1])
+        self.assertGreater(audio._pan_gains(1.0, 0.0)[1],
+                           audio._pan_gains(1.0, 0.0)[0])
         audio.handle(("player_breath", 0.8, 0.0, 1.0))
-        audio.handle(("monster_voice", 0, 0.4, 1.0, 0.0))
-        audio.handle(("shout", 1.0, 0.0, 1.0))
-        audio.handle(("gunshot", 1.0, 0.0, 1.0))
+        audio.handle(("monster_breath", 0.8, 0.0, 1.0))
         with patch.object(audio, "_play") as play:
-            audio.handle(("jumpscare_glitch", 1.0, 0.0))
-        play.assert_called_once_with("jumpscare_glitch", 0.65)
+            audio.handle(("step", 0.0, 0.0, 1.0))
+            play.assert_called_once_with("step2", 0.19, 0.0, front=1.0)
+        with patch("game.audio.random.choice", side_effect=lambda choices: choices[0]):
+            with patch.object(audio, "_play") as play:
+                audio.handle(("monster_voice", 0.4, 1.0, 0.0))
+                audio.handle(("monster_near", 1.0, 0.0))
+                audio.handle(("shout", 1.0, 0.0, 1.0))
+                audio.handle(("jumpscare", 1.0, 0.0))
+        self.assertEqual([call.args[0] for call in play.call_args_list],
+                         [MONSTER_VOICES[0], "proxima_dos_move",
+                          HEY_VOICES[0], "scream"])
         self.assertTrue(pygame.mixer.get_busy())
         audio.stop()
 
-    def test_jumpscare_al_perder_y_audio_glitch_sin_rugido(self):
+    def test_sobbing_bloquea_todos_los_sonidos_hasta_recuperacion(self):
+        import pygame
+        from game.audio import Audio
+
+        class ShotChannel:
+            busy = True
+
+            def get_busy(self):
+                return self.busy
+
+        pygame.init()
+        pygame.mixer.init(22050, -16, 2, 512, allowedchanges=0)
+        audio = Audio()
+        shot_channel = ShotChannel()
+        with patch.object(pygame.mixer, "stop") as stop_audio:
+            with patch.object(audio, "_play", return_value=shot_channel) as play:
+                audio.handle(("monster_hit", 0.0, 1.0))
+                audio.handle(("gunshot", 1.0, 0.0, 1.0))
+                audio.handle(("monster_voice", 0.4, 1.0, 0.0))
+                audio.handle(("shout", 1.0, 0.0, 1.0))
+                play.assert_called_once_with("gunshot", 1.0, 0.0, front=1.0)
+                self.assertTrue(audio._exclusive_sobbing)
+                self.assertIsNotNone(audio._pending_sobbing)
+                shot_channel.busy = False
+                audio.handle(("monster_voice", 0.4, 1.0, 0.0))
+                self.assertEqual(play.call_args_list[-1].args[0], "sobbing")
+                self.assertEqual(play.call_args_list[-1].kwargs,
+                                 {"loops": -1, "front": 1.0})
+                audio.handle(("monster_recovered",))
+                self.assertFalse(audio._exclusive_sobbing)
+        self.assertEqual(stop_audio.call_count, 2)
+        self.assertEqual(play.call_args.args[0], "drone")
+        audio.stop()
+
+    def test_sobbing_se_detiene_cuando_el_monstruo_se_recupera(self):
+        world = World(DIFFICULTIES[2], seed=27)
+        world.monster.incapacitated_until = world.time + 0.1
+        world._monster_incapacitation_active = True
+        world.update(0.06)
+        self.assertFalse(any(event[0] == "monster_recovered" for event in world.events))
+        world.update(0.06)
+        self.assertEqual(sum(event[0] == "monster_recovered" for event in world.events), 1)
+        world.update(0.06)
+        self.assertEqual(sum(event[0] == "monster_recovered" for event in world.events), 1)
+
+    def test_jumpscare_al_perder_y_scream_solo_al_perder(self):
         import types
         import pygame
         from unittest.mock import patch
@@ -286,7 +387,7 @@ class Tests(unittest.TestCase):
             app.update_play(0.01)
         self.assertEqual(app.scene, END)
         self.assertTrue(app._jumpscare_played)
-        play_sound.assert_called_once_with(("jumpscare_glitch", 1.0, 0.0))
+        play_sound.assert_called_once_with(("jumpscare", 1.0, 0.0))
 
         app.world.end_time = 0.3
         app.screen.fill((0, 0, 0))
@@ -318,20 +419,56 @@ class Tests(unittest.TestCase):
         w._voice_timer = 0.0
         w.update(0.05)
         voice = next(event for event in w.events if event[0] == "monster_voice")
-        self.assertGreaterEqual(voice[2], 0.24)
-        self.assertLessEqual(voice[2], 0.64)
+        self.assertGreaterEqual(voice[1], 0.24)
+        self.assertLessEqual(voice[1], 0.64)
+        self.assertTrue(-1.0 <= voice[2] <= 1.0)
         self.assertTrue(-1.0 <= voice[3] <= 1.0)
-        self.assertTrue(-1.0 <= voice[4] <= 1.0)
 
-    def test_audio_construye_spatializaciones_delanteras_y_traseras(self):
+    def test_frase_periodica_tambien_suena_cerca_y_fuera_de_patrulla(self):
+        w = World(DIFFICULTIES[2], seed=21)
+        distances = w.maze.bfs_dist(w.player_tile)
+        near_tile = next(tile for tile, distance in distances.items() if distance == 1)
+        w.monster.cur = w.monster.nxt = near_tile
+        w.monster.t = 0.0
+        w.monster.idle = 1000.0
+        w.monster.state = "INVESTIGA"
+        w._voice_timer = 0.0
+        w.update(0.05)
+        self.assertTrue(any(event[0] == "monster_voice" for event in w.events))
+        self.assertTrue(any(event[0] == "monster_near" for event in w.events))
+
+    def test_proxima_dos_move_solo_suena_a_diez_pasos_o_menos(self):
+        w = World(DIFFICULTIES[2], seed=21)
+        distances = w.maze.bfs_dist(w.player_tile)
+        near_tile = next(tile for tile, distance in distances.items()
+                         if distance == PROXIMA_DOS_MOVE_RANGE)
+        w.monster.cur = w.monster.nxt = near_tile
+        w.monster.t = 0.0
+        w.monster.idle = 1000.0
+        w._voice_timer = 0.0
+        w.update(0.05)
+        self.assertTrue(any(event[0] == "monster_near" for event in w.events))
+        self.assertTrue(any(event[0] == "monster_voice" for event in w.events))
+
+        far_tile = next(tile for tile, distance in distances.items()
+                        if distance == PROXIMA_DOS_MOVE_RANGE + 1)
+        w.monster.cur = w.monster.nxt = far_tile
+        w.monster.idle = 1000.0
+        w._voice_timer = 0.0
+        w.events.clear()
+        w.update(0.05)
+        self.assertFalse(any(event[0] == "monster_near" for event in w.events))
+
+    def test_audio_panea_sin_construir_buffers_por_direccion(self):
         import pygame
         from game.audio import Audio
         pygame.init()
         pygame.mixer.init(22050, -16, 2, 512, allowedchanges=0)
         audio = Audio()
-        front = audio._spatial_sound("step", 0.0, 1.0)
-        rear = audio._spatial_sound("step", 0.0, -1.0)
-        self.assertNotEqual(front.get_raw(), rear.get_raw())
+        front = audio._pan_gains(0.0, 1.0)
+        rear = audio._pan_gains(0.0, -1.0)
+        self.assertGreater(front[0], rear[0])
+        self.assertGreater(front[1], rear[1])
         audio.handle(("step", 0.8, -1.0, 0.0))
         audio.stop()
 
@@ -360,6 +497,9 @@ class Tests(unittest.TestCase):
         self.assertTrue(w.throw_pebble())
         w.pebble_projectiles[0]["elapsed"] = w.pebble_projectiles[0]["duration"] * 0.4
         renderer.render(pygame.Surface((RENDER_W, RENDER_H)), w)
+        self.assertGreater(len(renderer._wall_column_cache), 0)
+        self.assertLessEqual(len(renderer._wall_column_cache),
+                             renderer._wall_column_cache_limit)
 
     # ---------------------------------------------------------------- novedades
     def _near_monster(self, w, steps):
@@ -406,7 +546,8 @@ class Tests(unittest.TestCase):
 
         w.update(0.05)
 
-        self.assertTrue(any(event[0] in ("monster_breath", "monster_roar", "scrape") for event in w.events))
+        self.assertTrue(any(event[0] in ("monster_breath", "scrape") for event in w.events))
+        self.assertFalse(any(event[0] == "monster_roar" for event in w.events))
 
     def test_traza_de_busqueda(self):
         rng = random.Random(9)

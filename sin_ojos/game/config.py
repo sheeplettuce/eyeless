@@ -16,6 +16,10 @@ SPRINT_NOISE_FACTOR = 1.3          # correr amplifica los pasos
 SPRINT_MONSTER_MARGIN = 1.05       # al correr, supera por poco la velocidad máxima del monstruo
 PEBBLE_PICKUP_COUNT = 6
 WEAPON_PICKUP_COUNT = 2
+MAGAZINE_SIZE = 6
+STARTING_MAGAZINE_AMMO = 3
+STARTING_RESERVE_AMMO = 3
+AMMO_PICKUP_AMOUNT = 6
 WEAPON_RANGE = 18.0
 WEAPON_HIT_RADIUS = 0.42
 WEAPON_STUN_DURATION = {"facil": 60.0, "medio": 40.0, "dificil": 25.0}
@@ -23,6 +27,7 @@ PLAYER_RADIUS = 0.22
 CATCH_RADIUS = 0.55                # distancia a la que el monstruo te "toca"
 PEBBLE_RANGE = 7.0
 SHOUT_RANGE_FACTOR = 2.1
+PROXIMA_DOS_MOVE_RANGE = 10
 DIFFUSE_PERIOD = 0.4               # cada cuánto se difunde la creencia (s)
 
 # --- pasos del monstruo (audio)

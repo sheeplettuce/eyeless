@@ -33,6 +33,10 @@ class DevView:
         self._t0 = 0                # ms (reloj real) en que empezó la reproducción
         self._frontier = []
         self._cell = None
+        self._map_key = None
+        self._map_background = None
+        self._belief_source = None
+        self._belief_overlay = None
 
     # ------------------------------------------------------------------ utilidades
     def _plan_progress(self, plan):
@@ -54,30 +58,48 @@ class DevView:
         map_size = 220
         ts = max(4, min(8, (map_size - 8) // m.w))
         ox, oy = SCREEN_W - map_size - 16, 20
-        backdrop = pygame.Surface((map_size, map_size + 38), pygame.SRCALPHA)
-        backdrop.fill((4, 4, 8, 225))
-        screen.blit(backdrop, (ox - 6, oy - 8))
+        map_key = (id(m), map_size, ts, tuple(sorted(m.doors.items())))
+        if map_key != self._map_key:
+            self._map_background = pygame.Surface((map_size, map_size + 38),
+                                                  pygame.SRCALPHA)
+            self._map_background.fill((4, 4, 8, 225))
+            for y in range(m.h):
+                for x in range(m.w):
+                    rect = pygame.Rect(6 + x * ts, 30 + y * ts, ts, ts)
+                    if m.grid[y][x]:
+                        pygame.draw.rect(self._map_background, C_WALL, rect)
+                    else:
+                        shade = world.floor_darkness.get((x, y), 0.0)
+                        if (x, y) in world.noisy:
+                            shade = min(0.55, shade + 0.055)
+                        base = tuple(int(c * (1 - shade)) for c in C_FLOOR)
+                        pygame.draw.rect(self._map_background, base, rect)
+            self._map_key = map_key
+            self._belief_source = None
+
+        if mon.belief is not self._belief_source:
+            self._belief_overlay = pygame.Surface((map_size, map_size + 38),
+                                                  pygame.SRCALPHA)
+            self._belief_overlay.fill((0, 0, 0, 0))
+            for y in range(m.h):
+                for x in range(m.w):
+                    if m.grid[y][x]:
+                        continue
+                    belief = mon.belief[y * m.w + x]
+                    if belief * len(m.floor) > 0.03:
+                        red = min(160, int(belief * len(m.floor) * 55))
+                        pygame.draw.rect(self._belief_overlay, (red, 0, 0),
+                                         (6 + x * ts, 30 + y * ts, ts, ts))
+            self._belief_source = mon.belief
+
+        screen.blit(self._map_background, (ox - 6, oy - 8))
+        screen.blit(self._belief_overlay, (ox - 6, oy - 8))
         screen.blit(font.render("MAPA DEV", True, (255, 100, 100)), (ox, oy - 4))
 
         def cen(tile):
             return (ox + (tile[0] + 0.5) * ts, oy + 22 + (tile[1] + 0.5) * ts)
 
         map_y = oy + 22
-        for y in range(m.h):
-            for x in range(m.w):
-                rect = pygame.Rect(ox + x * ts, map_y + y * ts, ts, ts)
-                if m.grid[y][x]:
-                    pygame.draw.rect(screen, C_WALL, rect)
-                else:
-                    shade = world.floor_darkness.get((x, y), 0.0)
-                    if (x, y) in world.noisy:
-                        shade = min(0.55, shade + 0.055)
-                    base = tuple(int(c * (1 - shade)) for c in C_FLOOR)
-                    pygame.draw.rect(screen, base, rect)
-                    belief = mon.belief[y * m.w + x]
-                    if belief * len(m.floor) > 0.03:
-                        pygame.draw.rect(screen, (min(160, int(belief * len(m.floor) * 55)), 0, 0), rect)
-
         plan = mon.last_plan
         shown, total = self._plan_progress(plan)
         if plan:

@@ -1,18 +1,19 @@
 """Ventana, menús, HUD y bucle principal."""
 import math
 import random
+from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 
 import pygame
 
 from .audio import Audio
 from .config import (SCREEN_W, SCREEN_H, SPRINT_MAX, RENDER_W, RENDER_H, FPS,
-                     DIFFICULTIES, BY_KEY)
+                     DIFFICULTIES, BY_KEY, MAGAZINE_SIZE)
 from .debug_view import DevView
 from .render import Renderer
 from .world import World, PLAYING, LOST
 
-MENU, PLAY, PAUSE, END = "menu", "play", "pause", "end"
+MENU, LOADING, PLAY, PAUSE, END = "menu", "loading", "play", "pause", "end"
 FONT_NAME = pygame.font.match_font("Times New Roman") or None
 MENU_FONT_FILE = Path(__file__).with_name("assets") / "EngraversMT.ttf"
 MENU_FONT_NAME = (str(MENU_FONT_FILE) if MENU_FONT_FILE.is_file()
@@ -55,6 +56,13 @@ class App:
         self.show_map = True
         self.world = None
         self.renderer = None
+        self._generation_executor = ThreadPoolExecutor(max_workers=1,
+                                   thread_name_prefix="maze-generator")
+        self._generation_future = None
+        self._loading_diff = None
+        self._loading_elapsed = 0.0
+        self._loading_error = None
+        self.selected_slot = 0
         self.seed_arg = getattr(args, "semilla", None)
         if getattr(args, "dificultad", None):
             self.sel = DIFFICULTIES.index(BY_KEY[args.dificultad])
@@ -63,16 +71,48 @@ class App:
     # ---------------------------------------------------------- flujo
     def start_game(self):
         diff = DIFFICULTIES[self.sel]
-        self.world = World(diff, self.seed_arg)
+        seed = self.seed_arg
         self.seed_arg = None
-        self.renderer = Renderer(self.world.maze)
+        self.selected_slot = 0
         self._jumpscare_played = False
-        self.show_map = diff.minimap != "off"
-        self.scene = PLAY
+        self.world = None
+        self.renderer = None
+        self._loading_diff = diff
+        self._loading_elapsed = 0.0
+        self._loading_error = None
+        self._generation_future = self._generation_executor.submit(World, diff, seed)
+        self.scene = LOADING
         self._sync_window()
         self.audio.stop()
+        self.grab(False)
+
+    def _finish_generation(self):
+        try:
+            self.world = self._generation_future.result()
+            self.renderer = Renderer(self.world.maze)
+        except Exception as error:
+            self._loading_error = str(error)
+            self.scene = MENU
+            self._generation_future = None
+            return
+        self.show_map = self._loading_diff.minimap != "off"
+        self._generation_future = None
+        self.scene = PLAY
         self.audio.ambient()
         self.grab(True)
+
+    def draw_loading(self, dt):
+        self._loading_elapsed += dt
+        self.screen.fill((7, 8, 10))
+        center = (SCREEN_W // 2, SCREEN_H // 2)
+        self.text("GENERANDO LABERINTO", self.f, (190, 190, 195),
+                  (center[0], center[1] - 25), center=True, shadow=False)
+        track = pygame.Rect(center[0] - 110, center[1] + 20, 220, 4)
+        pygame.draw.rect(self.screen, (44, 46, 50), track)
+        segment_x = track.x + int((track.width - 55) *
+                                  (0.5 + 0.5 * math.sin(self._loading_elapsed * 4.0)))
+        pygame.draw.rect(self.screen, (165, 165, 170),
+                         (segment_x, track.y, 55, track.height))
 
     def grab(self, on):
         pygame.event.set_grab(on)
@@ -101,9 +141,9 @@ class App:
             return
         if e.type == pygame.MOUSEBUTTONDOWN:
             if self.scene == PLAY and e.button == 1:
-                if self.world.ammo:
+                if self.selected_slot == 1:
                     self.world.shoot_weapon()
-                else:
+                elif self.selected_slot == 0:
                     self.world.throw_pebble()
             elif self.scene == PLAY and e.button == 3:
                 self.world.shout()
@@ -129,10 +169,16 @@ class App:
             if k == pygame.K_ESCAPE:
                 self.scene = PAUSE
                 self.grab(False)
+            elif pygame.K_1 <= k <= pygame.K_5:
+                self.selected_slot = k - pygame.K_1
             elif k == pygame.K_SPACE:
                 self.world.throw_pebble()
             elif k == pygame.K_f:
                 self.world.shoot_weapon()
+            elif k == pygame.K_r:
+                self.world.reload_weapon()
+            elif k == pygame.K_e:
+                self.world.interact_door()
             elif k == pygame.K_TAB and self.world.diff.minimap != "off":
                 self.show_map = not self.show_map
             elif k == pygame.K_F1:
@@ -174,7 +220,7 @@ class App:
                 self.scene = END
                 self.audio.stop()
                 if w.state == LOST and not self._jumpscare_played:
-                    self.audio.handle(("jumpscare_glitch", 1.0, 0.0))
+                    self.audio.handle(("jumpscare", 1.0, 0.0))
                     self._jumpscare_played = True
                 self.grab(False)
         elif self.scene == END:
@@ -201,7 +247,7 @@ class App:
         s.blit(self.menu_image, image_rect)
         self.text("EYELESS", self.menu_title_font, (185, 185, 190), (48, 61))
         self.text("NO PUEDE VERTE. SOLO PUEDE OÍRTE.", self.menu_small_font,
-                  (105, 105, 112), (51, 119), shadow=False)
+                  (122, 122, 128), (51, 119), shadow=False)
         descriptions = (
             "Persigue sin encontrar siempre el camino mas corto.",
             "Busca la ruta mas corta por los pasillos.",
@@ -210,19 +256,20 @@ class App:
         for i, d in enumerate(DIFFICULTIES):
             y = 174 + i * 82
             on = i == self.sel
-            col = (218, 218, 222) if on else (107, 107, 114)
+            col = (218, 218, 222) if on else (133, 133, 140)
             if on:
                 pygame.draw.rect(s, (12, 12, 14), (39, y - 9, 490, 67), border_radius=2)
                 pygame.draw.rect(s, (104, 35, 40), (39, y - 9, 2, 67))
             self.text(f"{i + 1}.  {d.label.upper()}", self.menu_option_font, col, (54, y))
             self.text(f"IA {d.algorithm.upper()}  /  {descriptions[i]}", self.menu_desc_font,
-                      (116, 116, 122) if on else (74, 74, 80), (57, y + 34), shadow=False)
+                      (134, 134, 140) if on else (100, 100, 106),
+                      (57, y + 34), shadow=False)
         self.text("↑ / ↓   ELEGIR      ENTER   COMENZAR      ESC   SALIR",
                   self.menu_small_font, (130, 130, 136), (49, 435), shadow=False)
-        self.text("WASD MOVER   ·   SHIFT CORRER   ·   ESPACIO PIEDRA",
-                  self.menu_small_font, (78, 78, 84), (49, 475), shadow=False)
+        self.text("WASD MOVER   ·   SHIFT CORRER   ·   ESPACIO PIEDRA   ·   E PUERTAS",
+                  self.menu_small_font, (94, 94, 100), (49, 475), shadow=False)
         self.text("F / CLIC DISPARAR   ·   CLIC DERECHO GRITAR",
-                  self.menu_small_font, (78, 78, 84), (49, 502), shadow=False)
+                  self.menu_small_font, (94, 94, 100), (49, 502), shadow=False)
 
     def draw_minimap(self):
         w = self.world
@@ -239,7 +286,10 @@ class App:
                 if mode == "near" and t not in w.explored:
                     continue
                 r = (ox + x * ts, oy + y * ts, ts, ts)
-                if m.grid[y][x]:
+                if t in m.doors:
+                    color = (54, 135, 101) if m.doors[t] else (145, 91, 48)
+                    pygame.draw.rect(self.screen, color, r)
+                elif m.grid[y][x]:
                     pygame.draw.rect(self.screen, (90, 90, 100), r)
                 elif t == w.exit:
                     pygame.draw.rect(self.screen, (80, 230, 120), r)
@@ -266,15 +316,17 @@ class App:
         self.text(f"{mm:02d}:{ss:02d}", self.f_small, (170, 170, 180), (SCREEN_W - 70, 14))
         self.text(w.exit_hint(), self.f_small, (170, 210, 180),
                   (SCREEN_W // 2, 24), True)
-        self.text(f"Piedras: {w.pebbles}", self.f_small, (200, 200, 205), (16, SCREEN_H - 32))
-        self.text(f"Munición: {w.ammo}", self.f_small, (220, 190, 130), (16, SCREEN_H - 58))
-        stamina_rect = pygame.Rect(160, SCREEN_H - 25, 150, 12)
+        self.draw_inventory()
+        stamina_rect = pygame.Rect(16, SCREEN_H - 22, 100, 10)
         pygame.draw.rect(self.screen, (32, 32, 38), stamina_rect)
         fill = stamina_rect.copy()
         fill.width = int(stamina_rect.width * w.stamina / SPRINT_MAX)
         pygame.draw.rect(self.screen, (70, 165, 255) if w.stamina > 25 else (220, 100, 70), fill)
-        self.text("Correr: Shift", self.f_small, (160, 190, 220),
-                  (stamina_rect.right + 8, SCREEN_H - 32))
+        self.text("RESISTENCIA", self.f_small, (160, 190, 220),
+                  (16, SCREEN_H - 48))
+        if w.door_ahead() is not None:
+            self.text("E: abrir / cerrar", self.f_small, (205, 175, 130),
+                      (SCREEN_W - 180, SCREEN_H - 48))
         if w.noise_flash > 0:
             a = int(255 * min(1.0, w.noise_flash * 1.5))
             img = self.f_mid.render("¡ruido!", True, (230, 60, 60))
@@ -282,11 +334,52 @@ class App:
             self.screen.blit(img, img.get_rect(center=(SCREEN_W // 2, 60)))
         if w.time < w.diff.grace:
             self.text("Algo duerme en el laberinto... encuentra la luz verde.", self.f_small,
-                      (150, 150, 160), (SCREEN_W // 2, SCREEN_H - 60), True)
+                      (150, 150, 160), (SCREEN_W // 2, SCREEN_H - 94), True)
         if w.time < w.monster.incapacitated_until:
             remaining = math.ceil(w.monster.incapacitated_until - w.time)
             self.text(f"Monstruo incapacitado: {remaining} s", self.f_small,
-                      (150, 190, 230), (SCREEN_W // 2, SCREEN_H - 86), True)
+                      (150, 190, 230), (SCREEN_W // 2, SCREEN_H - 116), True)
+
+    def draw_inventory(self):
+        slot_size, gap, padding = 44, 3, 6
+        width = 5 * slot_size + 4 * gap
+        height = slot_size + padding * 2
+        left = (SCREEN_W - width) // 2
+        top = SCREEN_H - height - 20
+        panel = pygame.Rect(left - padding, top - padding, width + padding * 2,
+                            height + padding * 2)
+        pygame.draw.rect(self.screen, (8, 9, 12), panel)
+        pygame.draw.rect(self.screen, (88, 90, 94), panel, 1)
+
+        for index in range(5):
+            x = left + index * (slot_size + gap)
+            rect = pygame.Rect(x, top, slot_size, slot_size)
+            selected = index == self.selected_slot
+            pygame.draw.rect(self.screen, (67, 63, 53) if selected else (28, 29, 32), rect)
+            pygame.draw.rect(self.screen, (220, 194, 130) if selected else (86, 88, 92), rect, 2)
+            self.text(str(index + 1), self.f_small, (185, 185, 185),
+                      (x + 3, top + 1), shadow=False)
+
+            if index == 0:
+                icon = pygame.transform.scale(self.renderer.pebble_sprite, (27, 27))
+                self.screen.blit(icon, icon.get_rect(center=(rect.centerx, rect.centery + 2)))
+                count = self.world.pebbles
+            elif index == 1:
+                icon = pygame.transform.scale(self.renderer.weapon_sprite, (32, 22))
+                icon.set_alpha(255 if self.world.ammo else 95)
+                self.screen.blit(icon, icon.get_rect(center=(rect.centerx, rect.centery + 2)))
+                count = f"{self.world.ammo}/{MAGAZINE_SIZE}"
+            else:
+                count = None
+
+            if count is not None:
+                label = self.f_small.render(str(count), True, (240, 240, 230))
+                self.screen.blit(label, label.get_rect(bottomright=(rect.right - 3,
+                                                                     rect.bottom - 2)))
+
+        reserve = self.f_small.render(f"R RECARGA {self.world.ammo_reserve}",
+                          True, (180, 180, 185))
+        self.screen.blit(reserve, (panel.right + 10, panel.centery - reserve.get_height() // 2))
 
     def draw_end(self):
         w = self.world
@@ -330,7 +423,7 @@ class App:
 
     def draw_play(self):
         self._sync_window()
-        self.renderer.render(self.view, self.world)
+        self.renderer.render(self.view, self.world, self.selected_slot)
         game_area = self.screen.subsurface((0, 0, SCREEN_W, SCREEN_H))
         pygame.transform.scale(self.view, (SCREEN_W, SCREEN_H), game_area)
         if self.scene != END:
@@ -367,11 +460,17 @@ class App:
             dt = min(self.clock.tick(FPS) / 1000.0, 0.05)
             for e in pygame.event.get():
                 self.handle(e)
-            if self.scene == MENU:
+            if self.scene == LOADING:
+                self.draw_loading(dt)
+                if self._generation_future is not None and self._generation_future.done():
+                    self._finish_generation()
+            elif self.scene == MENU:
                 self.draw_menu()
             else:
                 self.update_play(dt)
                 self.draw_play()
-            self.draw_dev_checkbox()
+            if self.scene != LOADING:
+                self.draw_dev_checkbox()
             pygame.display.flip()
+        self._generation_executor.shutdown(wait=True, cancel_futures=True)
         pygame.quit()

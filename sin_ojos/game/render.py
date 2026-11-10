@@ -1,6 +1,8 @@
 """Raycaster en primera persona (estilo Wolfenstein) con linterna y sprites."""
 import math
 import random
+from collections import OrderedDict
+from pathlib import Path
 
 import pygame
 
@@ -13,7 +15,13 @@ SHADES = 32
 class Renderer:
     def __init__(self, maze):
         self.grid = maze.grid
+        self.doors = maze.doors
+        self.room_tiles = maze.room_tiles
         self.wall_shades = self._build_walls()
+        texture_path = Path(__file__).with_name("assets") / "wood_floor.png"
+        self.wood_texture = pygame.transform.smoothscale(
+            pygame.image.load(str(texture_path)).convert(), (TEX, TEX))
+        self.door_shades = self._build_shades(self.wood_texture)
         self.backdrop = self._build_backdrop()
         self.vignette = self._build_vignette()
         self.monster_sprites = [self._build_monster(i * 2 * math.pi / 12) for i in range(12)]
@@ -21,13 +29,43 @@ class Renderer:
         self.pebble_sprite = self._build_pebble()
         self.weapon_sprite = self._build_weapon()
         self.exit_sprite = self._build_exit()
+        self.hand_fps = 12
+        self.hand_atlases = {}
+        self.hand_frames = self._load_atlas("hand_atlas.png", 60)
+        self.hold_frames = self._load_atlas("hold_atlas.png", 60)
+        self.idlegun_frames = self._load_atlas("idlegun_atlas.png", 60)
+        self.gunshot_frames = self._load_atlas("gunshot_atlas.png", 18)
+        assets = Path(__file__).with_name("assets")
+        self.throw_sprite = pygame.image.load(str(assets / "throw_bw.png")).convert_alpha()
+        self.muzzle_glow = self._build_muzzle_glow()
         self.fog_layers = self._build_fog()
+        self.camera_overlay = self._build_camera_overlay()
         self.zbuf = [0.0] * RENDER_W
+        self._wall_column_cache = OrderedDict()
+        self._wall_column_cache_limit = 8192
         self.floor_layer = pygame.Surface((RENDER_W, RENDER_H), pygame.SRCALPHA).convert_alpha()
         self._floor_key = None
         self._floor_frame = 0
 
     # ---------------------------------------------------------- recursos
+    def _load_atlas(self, filename, frame_count):
+        atlas = pygame.image.load(
+            str(Path(__file__).with_name("assets") / filename)).convert_alpha()
+        self.hand_atlases[filename] = atlas
+        return [atlas.subsurface(((index % 6) * 128, (index // 6) * 230, 128, 230))
+                for index in range(frame_count)]
+
+    def _build_muzzle_glow(self):
+        size = 80
+        glow = pygame.Surface((size, size), pygame.SRCALPHA)
+        center = (size // 2, size // 2)
+        for y in range(size):
+            for x in range(size):
+                distance = math.hypot(x - center[0], y - center[1]) / (size * 0.5)
+                alpha = int(max(0.0, 1.0 - distance) ** 2 * 210)
+                glow.set_at((x, y), (218, 24, 18, alpha))
+        return glow
+
     def _build_walls(self):
         rng = random.Random(7)
         base = pygame.Surface((TEX, TEX))
@@ -38,7 +76,9 @@ class Renderer:
                 n = rng.randint(-14, 14)
                 c = (34 + n // 2,) * 3 if mortar else (104 + n, 94 + n, 86 + n)
                 base.set_at((x, y), tuple(max(0, min(255, v)) for v in c))
-        base = base.convert()
+        return self._build_shades(base.convert())
+
+    def _build_shades(self, base):
         shades = []
         for i in range(SHADES):
             f = i / (SHADES - 1)
@@ -71,6 +111,23 @@ class Renderer:
                 a = int(max(0.0, min(1.0, (r - 0.3) * 1.35)) * 235)
                 s.set_at((x, y), (0, 0, 0, a))
         return pygame.transform.smoothscale(s, (RENDER_W, RENDER_H)).convert_alpha()
+
+    def _build_camera_overlay(self):
+        overlay = pygame.Surface((RENDER_W, RENDER_H), pygame.SRCALPHA)
+        for y in range(2, RENDER_H, 4):
+            pygame.draw.line(overlay, (0, 0, 0, 18), (0, y), (RENDER_W, y))
+        color = (190, 195, 190, 75)
+        inset, length = 8, 12
+        for x, direction in ((inset, 1), (RENDER_W - inset - 1, -1)):
+            for y, vertical in ((inset, 1), (RENDER_H - inset - 1, -1)):
+                pygame.draw.line(overlay, color, (x, y), (x + direction * length, y), 1)
+                pygame.draw.line(overlay, color, (x, y), (x, y + vertical * length), 1)
+        pygame.draw.circle(overlay, (220, 48, 42, 220), (18, 19), 3)
+        overlay.blit(pygame.font.Font(None, 14).render("REC", True, (220, 48, 42)), (25, 13))
+        pygame.draw.rect(overlay, color, (RENDER_W - 37, 14, 23, 10), 1)
+        pygame.draw.rect(overlay, color, (RENDER_W - 14, 17, 2, 4))
+        pygame.draw.rect(overlay, (190, 195, 190, 125), (RENDER_W - 34, 17, 14, 4))
+        return overlay
 
     def _build_fog(self):
         """Niebla: un degradado centrado en el horizonte + dos capas de nubes que se desplazan."""
@@ -146,13 +203,10 @@ class Renderer:
         return s
 
     def _build_weapon(self):
-        s = pygame.Surface((48, 32), pygame.SRCALPHA)
-        pygame.draw.rect(s, (45, 48, 53, 255), (5, 12, 31, 10), border_radius=3)
-        pygame.draw.rect(s, (125, 130, 138, 255), (10, 8, 24, 6), border_radius=2)
-        pygame.draw.rect(s, (65, 69, 76, 255), (26, 5, 13, 5))
-        pygame.draw.polygon(s, (54, 57, 64, 255), [(15, 20), (26, 20), (23, 31), (13, 29)])
-        pygame.draw.rect(s, (190, 55, 45, 255), (7, 14, 5, 4))
-        return s
+        path = Path(__file__).with_name("assets") / "handgun.png"
+        image = pygame.image.load(str(path)).convert_alpha()
+        bounds = image.get_bounding_rect(min_alpha=8)
+        return image.subsurface(bounds).copy()
 
     def _build_exit(self):
         w, h = 48, 96
@@ -165,7 +219,7 @@ class Renderer:
         return s
 
     # ---------------------------------------------------------- dibujo
-    def render(self, surf, world):
+    def render(self, surf, world, selected_slot=0):
         surf.blit(self.backdrop, (0, 0))
         t = world.time
         flick = 0.94 + 0.04 * math.sin(t * 13.0) * math.sin(t * 4.7) + 0.02 * math.sin(t * 31.0)
@@ -227,8 +281,19 @@ class Renderer:
                 continue
             s0 = int((v0 - y0) * TEX / line_h)
             s1 = int((v1 - y0) * TEX / line_h)
-            col = shades[idx].subsurface((tx, s0, 1, max(1, s1 - s0)))
-            surf.blit(pygame.transform.scale(col, (1, v1 - v0)), (x, v0))
+            wall = self.door_shades if (mx, my) in self.doors else shades
+            wall_shade = wall[idx]
+            cache_key = (id(wall_shade), tx, s0, s1, v1 - v0)
+            col = self._wall_column_cache.get(cache_key)
+            if col is None:
+                source = wall_shade.subsurface((tx, s0, 1, max(1, s1 - s0)))
+                col = pygame.transform.scale(source, (1, v1 - v0))
+                self._wall_column_cache[cache_key] = col
+                if len(self._wall_column_cache) > self._wall_column_cache_limit:
+                    self._wall_column_cache.popitem(last=False)
+            else:
+                self._wall_column_cache.move_to_end(cache_key)
+            surf.blit(col, (x, v0))
 
         floor_key = (round(px, 2), round(py, 2), round(dx, 2), round(dy, 2), round(light))
         self._floor_frame += 1
@@ -280,6 +345,37 @@ class Renderer:
                              0.17, 1.8, 1.0, vertical_offset, opacity)
         self._draw_fog(surf, fog * 0.3, t)            # ...y una pasada ligera sobre el monstruo
         surf.blit(self.vignette, (0, 0))
+        self._draw_hand(surf, world, t, selected_slot)
+        surf.blit(self.camera_overlay, (0, 0))
+
+    def _ping_pong_frame(self, frames, time):
+        last_frame = len(frames) - 1
+        phase = int(time * self.hand_fps) % (last_frame * 2)
+        frame_index = phase if phase <= last_frame else last_frame * 2 - phase
+        return frames[frame_index]
+
+    def _blit_hand(self, surf, frame):
+        surf.blit(frame, (RENDER_W - frame.get_width() - 4,
+                          RENDER_H - frame.get_height() + 20))
+
+    def _draw_hand(self, surf, world, time, selected_slot):
+        if world.hand_action == "throw" and time < world.hand_action_until:
+            frame = self.throw_sprite
+        elif world.hand_action == "gunshot" and time < world.hand_action_until:
+            frame_index = min(len(self.gunshot_frames) - 1,
+                              int((time - world.hand_action_started) * self.hand_fps))
+            frame = self.gunshot_frames[frame_index]
+        elif selected_slot == 0 and world.pebbles > 0:
+            frame = self._ping_pong_frame(self.hold_frames, time)
+        elif selected_slot == 1:
+            frame = self._ping_pong_frame(self.idlegun_frames, time)
+        else:
+            frame = self._ping_pong_frame(self.hand_frames, time)
+        self._blit_hand(surf, frame)
+        if time < world.muzzle_flash_until:
+            intensity = min(1.0, (world.muzzle_flash_until - time) / 0.06)
+            self.muzzle_glow.set_alpha(int(230 * intensity))
+            surf.blit(self.muzzle_glow, (RENDER_W - 146, RENDER_H - 166))
 
     def _draw_floor(self, surf, world, px, py, dx, dy, plx, ply, light):
         """Proyecta el sombreado de cada tile sobre el suelo visible."""
@@ -295,16 +391,24 @@ class Renderer:
                 if row_dist >= z[x]:
                     continue
                 cam = 2.0 * x / RENDER_W - 1.0
-                fx = int(px + row_dist * (dx + plx * cam))
-                fy = int(py + row_dist * (dy + ply * cam))
+                world_x = px + row_dist * (dx + plx * cam)
+                world_y = py + row_dist * (dy + ply * cam)
+                fx, fy = int(world_x), int(world_y)
                 if not (0 <= fy < len(grid) and 0 <= fx < len(grid[0])) or grid[fy][fx]:
                     continue
                 tile = (fx, fy)
                 shade = world.floor_darkness.get(tile, 0.0)
                 if tile in world.noisy:
                     shade = min(0.55, shade + 0.055)
-                value = max(0, min(255, int((3 + 21 * lit) * (1 - shade))))
-                pygame.draw.rect(surf, (value, value, min(255, value + 1)),
+                if tile in self.room_tiles:
+                    tx, ty = int(world_x * TEX) % TEX, int(world_y * TEX) % TEX
+                    texture_color = self.wood_texture.get_at((tx, ty))
+                    factor = (0.08 + 0.20 * lit) * (1 - shade)
+                    color = tuple(int(channel * factor) for channel in texture_color[:3])
+                else:
+                    value = max(0, min(255, int((3 + 21 * lit) * (1 - shade))))
+                    color = (value, value, min(255, value + 1))
+                pygame.draw.rect(surf, color,
                                  (x, y, min(step, RENDER_W - x), min(step, RENDER_H - y)))
 
     def _sprite(self, surf, img, sx, sy, px, py, dx, dy, plx, ply, hscale, fade_reach, flick,
